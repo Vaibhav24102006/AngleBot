@@ -1,0 +1,7 @@
+PyQt5
+watchdog
+pefile
+scikit-learn
+numpy
+pandas
+joblib
