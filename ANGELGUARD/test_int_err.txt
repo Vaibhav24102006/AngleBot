@@ -1,0 +1,35 @@
+OpenAI package not installed.
+OPENAI_API_KEY missing from configuration.
+C:\Users\victus\OneDrive\Desktop\Major project\ANGELGUARD\intelligence\intelligence_aggregator.py:80: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  payload["timestamp"] = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+FOpenAI package not installed.
+OPENAI_API_KEY missing from configuration.
+AI Explainer cannot run. Client not initialized.
+.OpenAI package not installed.
+OPENAI_API_KEY missing from configuration.
+AI Explainer cannot run. Client not initialized.
+.OpenAI package not installed.
+OPENAI_API_KEY missing from configuration.
+AI Explainer cannot run. Client not initialized.
+.OpenAI package not installed.
+OPENAI_API_KEY missing from configuration.
+.
+======================================================================
+FAIL: test_scenario_1_safe_file (tests.test_integration.TestAngelGuardIntegration.test_scenario_1_safe_file)
+Test 1 - SAFE file pipeline.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\victus\AppData\Local\Python\pythoncore-3.14-64\Lib\unittest\mock.py", line 1432, in patched
+    return func(*newargs, **newkeywargs)
+  File "C:\Users\victus\OneDrive\Desktop\Major project\ANGELGUARD\tests\test_integration.py", line 51, in test_scenario_1_safe_file
+    mock_ui.assert_not_called()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\victus\AppData\Local\Python\pythoncore-3.14-64\Lib\unittest\mock.py", line 946, in assert_not_called
+    raise AssertionError(msg)
+AssertionError: Expected 'trigger' to not have been called. Called 1 times.
+Calls: [call({'file_path': 'notepad.exe', 'hash': 'safehash', 'static_analysis': {'entropy': 4.1, 'suspicious_imports': 0, 'packed_flag': False}, 'risk_assessment': {'risk_score': 0, 'classification': 'SAFE', 'reasons': ['Clean']}, 'threat_intelligence': {'status': 'unknown'}, 'timestamp': '2026-03-05T21:51:51Z'}, {})].
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.056s
+
+FAILED (failures=1)

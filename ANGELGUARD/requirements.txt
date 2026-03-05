@@ -1,2 +1,5 @@
 psutil
 PyQt5
+requests
+python-dotenv
+openai
