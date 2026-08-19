@@ -559,3 +559,196 @@ single-writer MVP path — deferred until Phase 7 is actually wired into the
 same persistence architecture, not before), and `ui/employee_guidance.py`
 / `ui/main_window.py`. No ML, no GUI redesign, no new threat-intel or AI
 providers.
+
+## STEP 6 — User Experience & Analysis History
+
+### D27. UI audit and entry-point decision
+
+Inspected all three existing UI modules before writing anything:
+
+- `ui/main_window.py` — `launch()` constructs Phase 7 only:
+  `ProcessMonitor`/`NetworkMonitor`/`BehaviorCorrelator` on their own
+  `QThread`s plus `EmployeeDashboard`. Zero relation to the MVP pipeline —
+  never imports `pipeline/`, `event_logging/`, or `monitor/monitor_service.py`.
+  Not reachable from `app/main.py` (confirmed by import trace, matching
+  D2's original decision). Reusable: the generic `_start_monitor`/
+  `_stop_monitor` QThread helpers and `apply_dark_theme`, neither used
+  this step since Step 6 doesn't touch Phase 7 or restyle anything.
+- `ui/employee_dashboard.py` — Phase 7 snapshot baseline/compare widget
+  (`create_snapshot`/`compare_snapshots`), launched only by `main_window.py`.
+  Entirely disconnected from file analysis. Not reused.
+- `ui/employee_guidance.py` — the one MVP-relevant, already-partially-wired
+  component (D17): `GuidanceController`/`EmployeeGuidance`, thread-safe via
+  a Qt queued signal, already constructed and wired by `app/main.py`. This
+  is what Step 6 reuses and extends, not replaces.
+
+**Entry-point decision:** `app/main.py` remains ANGELGUARD's one
+user-facing MVP entry point (per Step 4's original requirement) — it now
+shows a real main window (`ui/app_window.py`, new) by default instead of
+running fully headless. `ui/main_window.py` is left completely untouched
+as the separate, still-not-wired Phase 7 "Employee Mode" launcher — Step 6
+explicitly excludes Phase 7, and repurposing that module or its name would
+either touch Phase 7 or create a confusing name collision. A `--headless`
+CLI flag on `app/main.py` preserves the exact pre-Step-6 console-only +
+popup-only behavior for development/testing, per the task's explicit ask
+to keep that path useful.
+
+### D28. New UI modules: `AnalysisDetailsDialog`, `HistoryPanel`, `AngelGuardWindow`
+
+Three new, single-purpose modules, each reusable independently:
+
+- `ui/analysis_details.py` — `AnalysisDetailsDialog`, a read-only view of
+  one canonical event (file/risk/static analysis/threat intel/explanation/
+  recommendation). Reused both from the guidance popup's new "Review
+  Details" button and from history row selection — one implementation,
+  not two.
+- `ui/history_panel.py` — `HistoryPanel`, a table backed directly by
+  `AdminEventLogger.list_events()`/`get_event()`. No new database, no new
+  event schema, no persistence logic duplicated here (Step 6's explicit
+  requirement) — it only ever reads.
+- `ui/app_window.py` — `AngelGuardWindow`, the new main window hosting a
+  status header and `HistoryPanel`. Deliberately has zero coupling to the
+  pipeline, the watchdog thread, or `GuidanceController` — it only
+  constructs its own `AdminEventLogger` (a second instance, same default
+  db path — SQLite is the shared boundary, not a shared Python object)
+  and polls. This keeps the window's thread-safety story trivial: it never
+  touches anything from a non-GUI thread.
+
+**History refresh: GUI-thread polling (`QTimer`, default 3s) plus a manual
+Refresh button, not a push notification from the pipeline.** Chosen over
+adding a new cross-thread signal from the watchdog thread into the window,
+per the task's explicit "do not add unnecessary threading complexity" —
+`GuidanceController`'s existing queued-signal mechanism already handles
+the one thing that genuinely needs real-time cross-thread delivery (the
+warning popup); history is not time-critical, and polling needs no new
+signal plumbing, no change to `AnalysisPipeline`'s public surface, and
+matches "the smallest useful history experience" the task asked for.
+
+### D29. Guidance contract changed to consume the canonical `final_event` (supersedes D23's guidance scope note)
+
+D23 (Step 5B) deliberately left `ui/employee_guidance.py` on the
+aggregator `payload` shape, scoping that step to persistence only. Step 6
+explicitly requires "the warning should consume the actual canonical final
+event" and "there must not be separate backend risk vs. UI risk" — so this
+step supersedes that boundary, on direct instruction, not by drift.
+
+Changed: `GuidanceSignals.trigger_alert` from `pyqtSignal(dict, dict)` to
+`pyqtSignal(dict)`; `GuidanceController.trigger()`/`_show_alert()` and
+`EmployeeGuidance.populate_data()` all take one `final_event` dict, reading
+`risk.level`/`risk.score`/`risk.reasons`/`explanation`/`recommended_action`
+instead of `risk_assessment.classification`/`risk_assessment.risk_score`.
+`AnalysisPipeline._run_guidance()` now passes `final_event` (the same
+object `_run_persistence()` already receives — one canonical event, not
+two constructed representations, verified by identity: `guidance.calls[0]
+is event` in `test_full_pipeline_produces_correct_canonical_event`).
+
+The fallback-vs-real-AI-content distinction in `populate_data()` was kept
+faithful to the original (`"unavailable"`/`"failed"` substring check on
+`ai_summary`), but the fallback branch now actually lists the deterministic
+`risk.reasons` — the original fallback branch showed only generic text and
+silently dropped the real reasons, which directly contradicted Step 6's
+"AI unavailable → still show deterministic reasons" requirement. Verified
+by `test_explanation_none_shows_unavailable_message_and_real_reasons`.
+
+A "Review Details" button was added to `EmployeeGuidance` (alongside the
+existing "Acknowledge & Close"), opening `AnalysisDetailsDialog` with the
+exact same event the popup is already showing — no separate fetch, no risk
+of the two views disagreeing.
+
+### D30. Real bug found via manual demonstration: `final_event["static_analysis"]` was the aggregator's reduced sub-dict, not the raw analyzer output
+
+While manually verifying the Analysis Details view against a real pipeline
+run (see D32), `AnalysisDetailsDialog` crashed: `TypeError: can only join
+an iterable` on `static.get("suspicious_imports")`. Root cause:
+`AnalysisPipeline._build_final_event()` was building the event's
+`static_analysis` field from `payload["static_analysis"]` —
+`intelligence_aggregator.aggregate_intelligence()`'s deliberately reduced
+sub-dict (`suspicious_imports` as an **int count**, a single max `entropy`
+float, `packed_flag`, `file_size`, `high_entropy_sections` — see D12) — not
+from `analysis`, the raw `static_analyzer.analyze_file()` result the
+pipeline already had in hand (`sections` list, `total_imports`,
+`suspicious_imports` as a **list of strings**, `total_strings`, PE-validity
+`error`). The reduced shape is exactly right for its actual consumers (risk
+scoring, the AI prompt) but is missing precisely the section/import/string
+detail Step 6's Analysis Details view is required to show.
+
+**Fix:** `_build_final_event()` now takes `analysis` (the raw dict) as an
+explicit parameter and uses it for the event's `static_analysis` field,
+instead of reading it back out of `payload`. `payload["static_analysis"]`
+itself — and everything that reads it (`aggregate_intelligence()`'s own
+output, the AI explainer's prompt construction) — is completely untouched;
+this only changes what the *outward-facing* final event (and therefore
+what gets persisted and shown in the UI) carries. Verified by a new
+assertion block in `test_full_pipeline_produces_correct_canonical_event`
+(checks `sections`, `total_imports`, `total_strings` are present and
+`suspicious_imports` is a list) and by the live demonstration in D32,
+re-run after the fix.
+
+This was not caught by Step 5B's own round-trip test
+(`test_stored_row_now_preserves_reasons_static_analysis_and_full_explanation`)
+because that test only asserts persistence is *faithful* to whatever
+`final_event["static_analysis"]` already contains — it never asserted
+that content matched the raw analyzer's canonical shape. Recorded here as
+a process note: a real UI consumer surfaced a data-shape gap that a
+persistence-focused round-trip test structurally could not.
+
+### D31. `AdminEventLogger` gets a `busy_timeout` PRAGMA
+
+Step 6 is the first point where a real second accessor of
+`angelguard_events.db` exists concurrently with the pipeline's writer: the
+GUI thread's `HistoryPanel` poll (`list_events()`/`get_event()`), whereas
+the Step 5 audit found zero readers on this database at all. A
+`PRAGMA busy_timeout = 3000` was added to every connection (`_connect()`
+helper) so a reader/writer collision waits briefly for the lock instead of
+raising `sqlite3.OperationalError` immediately. This is the single PRAGMA
+the audit already anticipated would eventually be needed "if Phase 7 is
+ever run" — it turned out to be needed sooner, from the MVP's own new GUI,
+not from Phase 7. WAL and broader concurrency tuning remain deferred, per
+the audit and per the task's explicit "do not add WAL merely because it
+sounds good" — one writer plus one lightweight poller doesn't need it.
+
+### D32. Manual end-to-end demonstration (real run, real network, no malware)
+
+Ran `app/main.py` for real (not headless) via a properly backgrounded
+process, confirmed the main window and `HistoryPanel` construct
+successfully, then copied a real `notepad.exe` into the live `~/Downloads`
+folder twice — once before D30's fix (which is what surfaced the bug) and
+once after, to confirm the fix.
+
+Post-fix run, observed in the live console output: detection → hashing →
+PE parsing (310 imports, 8 sections, 3458 strings extracted) → 3
+suspicious imports found → MalwareBazaar queried live (real 401, no API
+key) → VirusTotal skipped (no API key) → risk evaluated (score 20,
+SUSPICIOUS) → AI explanation gracefully unavailable (no `OPENAI_API_KEY`)
+→ event persisted → **"Security warning shown to user"** (the popup
+actually rendered in this session without crashing). No exception, no
+crash, at any point.
+
+Then, separately, constructed a real `AdminEventLogger` + `AngelGuardWindow`
+against the live database and confirmed: `HistoryPanel.refresh()` lists the
+new row; selecting it and calling `get_event()` returns the full event;
+`AnalysisDetailsDialog` built from that retrieved event renders the actual
+total-imports count (310), an actual suspicious import name
+(`GetProcAddress`), the actual strings count (3458), the "does NOT mean the
+file is safe" unknown-reputation disclaimer, and the AI-unavailable notice
+— proving the full persist → list → select → retrieve → display chain
+against a real (not fabricated) pipeline result. Both test artifacts
+(`angelguard_step6_demo*.exe`) were removed from the real Downloads folder
+afterward; the two demonstration rows were left in the real
+`data/angelguard_events.db` (consistent with the D18 precedent of not
+scrubbing the real database after a manual demo).
+
+### D33. Scope boundaries not implemented (deliberately)
+
+No ML, no Phase 7 (behavioral/network monitoring, snapshots), no
+sandboxing, no new threat-intel/AI providers, no major visual redesign, no
+automatic file deletion/quarantine/execution — `ui/main_window.py` and
+`ui/employee_dashboard.py` are untouched. No new database or event schema
+was created for history — `list_events()`/`get_event()` (Step 5B) are the
+only persistence surface the new UI touches. The "Current Alert" mockup
+surface from Step 6's own spec is served by the existing (now-updated)
+`EmployeeGuidance` popup rather than a duplicate panel embedded in
+`AngelGuardWindow` — Step 10 explicitly asked to keep scope tight, and a
+second live view of "the current alert" would either duplicate the popup's
+data or need its own cross-thread wiring for no functional gain over what
+`HistoryPanel`'s top row already shows post-hoc.

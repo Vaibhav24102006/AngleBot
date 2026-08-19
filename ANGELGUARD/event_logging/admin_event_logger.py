@@ -51,13 +51,28 @@ class AdminEventLogger:
         self.db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', db_path))
         self._ensure_db_exists()
 
+    def _connect(self) -> sqlite3.Connection:
+        """A short-lived connection with a busy timeout set. Step 6 adds
+        the first real concurrent accessor of this database — a GUI-thread
+        HistoryPanel polling list_events()/get_event() alongside the
+        watchdog-thread pipeline calling log_event() — so a write landing
+        mid-read (or vice versa) can now actually happen, where before
+        (Step 5 audit) this database had zero readers. A busy timeout lets
+        the loser of that race wait briefly for the lock instead of
+        raising immediately; WAL/broader concurrency tuning stays deferred
+        per the audit, since this single PRAGMA is enough for one writer
+        plus one lightweight poller."""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA busy_timeout = 3000")
+        return conn
+
     def _ensure_db_exists(self):
         """Creates the database/table if missing, then runs the additive
         migration unconditionally. Cheap and idempotent, so it's safe to
         repeat on every construction — this is the only place a database
         created before Step 5B picks up the new columns."""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
             cursor.execute(f'''
@@ -121,7 +136,7 @@ class AdminEventLogger:
         recommended_action = final_event.get("recommended_action")
         analysis_status = final_event.get("analysis_status")
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
             cursor.execute('''
@@ -170,7 +185,7 @@ class AdminEventLogger:
     def get_event(self, event_id: str) -> Optional[Dict[str, Any]]:
         """Returns the stored event as a canonical-shaped dict, or None if
         no row with this event_id exists."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute(
@@ -183,7 +198,7 @@ class AdminEventLogger:
     def list_events(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Most recent events first. A flat, unfiltered history is all the
         MVP needs — no query/paging framework warranted yet."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(

@@ -119,9 +119,9 @@ class AnalysisPipeline:
 
         explanation = self._run_ai_explanation(payload)
 
-        final_event = self._build_final_event(event_id, payload, explanation, "completed")
+        final_event = self._build_final_event(event_id, analysis, payload, explanation, "completed")
         final_event["persistence_error"] = self._run_persistence(final_event)
-        final_event["guidance_triggered"] = self._run_guidance(payload, explanation)
+        final_event["guidance_triggered"] = self._run_guidance(final_event)
 
         return final_event
 
@@ -180,14 +180,18 @@ class AnalysisPipeline:
             logger.error(f"[Pipeline] Failed to persist analysis event: {exc}")
             return str(exc)
 
-    def _run_guidance(self, payload: Dict[str, Any], explanation: Optional[Dict[str, str]]) -> bool:
+    def _run_guidance(self, final_event: Dict[str, Any]) -> bool:
         """Returns True if the guidance UI was actually triggered (i.e. the
-        classification warranted it and .trigger() did not raise)."""
+        classification warranted it and .trigger() did not raise).
+
+        Receives the same canonical final_event that was persisted (Step 6)
+        — there is no separate 'UI risk' computed anywhere; the guidance UI
+        reads exactly the same risk.level the caller and the database see."""
         if self._guidance is None:
             return False
         try:
-            self._guidance.trigger(payload, explanation or {})
-            classification = payload.get("risk_assessment", {}).get("classification")
+            self._guidance.trigger(final_event)
+            classification = (final_event.get("risk") or {}).get("level")
             return classification in ("SUSPICIOUS", "HIGH_RISK")
         except Exception as exc:
             logger.error(f"[Pipeline] Failed to trigger guidance UI: {exc}")
@@ -205,11 +209,26 @@ class AnalysisPipeline:
         )
 
     def _build_final_event(
-        self, event_id: str, payload: Dict[str, Any],
+        self, event_id: str, analysis: Dict[str, Any], payload: Dict[str, Any],
         explanation: Optional[Dict[str, str]], analysis_status: str,
     ) -> Dict[str, Any]:
+        """
+        `static_analysis` in the final event is the RAW analyze_file()
+        result (`analysis`), not aggregate_intelligence()'s reduced
+        static_analysis sub-dict (`payload["static_analysis"]`) — the
+        aggregator deliberately collapses sections/imports detail down to
+        what the AI-prompt and risk-scoring stages need (a single max
+        entropy value, an import *count*, a packed_flag bool), which is
+        correct for those internal consumers but is missing exactly the
+        section/import/string/PE-validity detail Step 6's Analysis Details
+        UI is required to show. `analysis` is already computed earlier in
+        analyze_and_decide() — this reuses it rather than recomputing
+        anything. `payload["static_analysis"]` itself is untouched, so the
+        AI explainer's prompt (which reads payload, not final_event) is
+        unaffected. See DECISIONS.md Step 6.
+        """
         risk = payload.get("risk_assessment", {})
-        static = payload.get("static_analysis", {})
+        static = analysis
         file_path = payload.get("file_path")
         return {
             "event_id": event_id,

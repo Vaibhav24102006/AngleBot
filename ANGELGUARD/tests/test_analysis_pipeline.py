@@ -83,8 +83,8 @@ class FakeGuidance:
         self._raises = raises
         self.calls = []
 
-    def trigger(self, payload, explanation):
-        self.calls.append((payload, explanation))
+    def trigger(self, final_event):
+        self.calls.append(final_event)
         if self._raises:
             raise self._raises
 
@@ -105,6 +105,14 @@ class TestHappyPath:
         assert event["risk"]["score"] == 20
         assert event["risk"]["level"] == "SUSPICIOUS"
         assert event["threat_intelligence"]["confidence"] == "low"
+        # static_analysis in the final event is the RAW analyze_file()
+        # result — sections/imports/strings detail, not
+        # aggregate_intelligence()'s reduced sub-dict (Step 6; a real gap
+        # found via the manual demonstration, see DECISIONS.md Step 6).
+        assert isinstance(event["static_analysis"]["suspicious_imports"], list)
+        assert "sections" in event["static_analysis"]
+        assert "total_imports" in event["static_analysis"]
+        assert "total_strings" in event["static_analysis"]
         assert event["explanation"]["ai_summary"] == "fake summary"
         assert event["recommended_action"] == "fake recommended action"
         assert event["persistence_error"] is None
@@ -114,6 +122,11 @@ class TestHappyPath:
         assert len(persistence.calls) == 1
         assert persistence.calls[0]["event_id"] == event["event_id"]
         assert persistence.calls[0] is event
+        # Guidance receives the same canonical event too (Step 6) — there is
+        # no separately computed "UI risk".
+        assert len(guidance.calls) == 1
+        assert guidance.calls[0]["risk"]["level"] == event["risk"]["level"]
+        assert guidance.calls[0] is event
 
     def test_safe_file_skips_ai_but_still_persists_and_does_not_trigger_guidance(self, tmp_path):
         path = _write(tmp_path, "clean.exe", make_valid_pe_bytes())

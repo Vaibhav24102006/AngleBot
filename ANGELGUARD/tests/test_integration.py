@@ -85,7 +85,7 @@ class TestAngelGuardIntegration(unittest.TestCase):
         
         # UI Evaluation
         with patch.object(self.guidance, '_show_alert') as mock_show:
-            self.guidance.trigger(payload, explanation or {})
+            self.guidance.trigger(_to_final_event(payload, explanation))
             mock_show.assert_not_called()
         
         # Logged to DB
@@ -119,10 +119,10 @@ class TestAngelGuardIntegration(unittest.TestCase):
         self.assertIn("ai_summary", explanation)
         
         with patch.object(self.guidance, '_show_alert') as mock_show:
-            self.guidance.trigger(payload, explanation)
+            self.guidance.trigger(_to_final_event(payload, explanation))
             classification = payload.get("risk_assessment", {}).get("classification")
             self.assertTrue(classification in ["SUSPICIOUS", "HIGH_RISK"])
-        
+
         self.logger.log_event(_to_final_event(payload, explanation))
 
     @patch('ui.employee_guidance.QApplication')
@@ -142,10 +142,10 @@ class TestAngelGuardIntegration(unittest.TestCase):
         explanation = self.explainer.generate_explanation(payload)
         
         with patch.object(self.guidance, '_show_alert') as mock_show:
-            self.guidance.trigger(payload, explanation)
+            self.guidance.trigger(_to_final_event(payload, explanation))
             classification = payload.get("risk_assessment", {}).get("classification")
             self.assertTrue(classification in ["SUSPICIOUS", "HIGH_RISK"])
-        
+
         self.logger.log_event(_to_final_event(payload, explanation))
 
         conn = sqlite3.connect(self.db_path)

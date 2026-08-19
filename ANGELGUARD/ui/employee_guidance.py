@@ -1,17 +1,18 @@
-import os
 import sys
 from typing import Dict, Any
 
 from PyQt5.QtWidgets import (
-    QApplication, QDialog, QVBoxLayout, QHBoxLayout, 
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFrame, QSizePolicy
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QIcon, QColor, QPalette
 
+from ui.analysis_details import AnalysisDetailsDialog
+
 class GuidanceSignals(QObject):
     """Signals for thread-safe UI updates."""
-    trigger_alert = pyqtSignal(dict, dict)
+    trigger_alert = pyqtSignal(dict)
 
 class EmployeeGuidance(QDialog):
     """
@@ -23,6 +24,7 @@ class EmployeeGuidance(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._event: Dict[str, Any] = None
         self.setWindowTitle("ANGELGUARD Security Alert")
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
         self.setMinimumWidth(500)
@@ -98,7 +100,13 @@ class EmployeeGuidance(QDialog):
         # Bottom Buttons
         self.button_layout = QHBoxLayout()
         self.button_layout.addStretch()
-        
+
+        self.details_btn = QPushButton("Review Details")
+        self.details_btn.setMinimumHeight(35)
+        self.details_btn.setMinimumWidth(130)
+        self.details_btn.clicked.connect(self._on_review_details)
+        self.button_layout.addWidget(self.details_btn)
+
         self.close_btn = QPushButton("Acknowledge & Close")
         self.close_btn.setMinimumHeight(35)
         self.close_btn.setMinimumWidth(150)
@@ -118,43 +126,59 @@ class EmployeeGuidance(QDialog):
         
         self.layout.addLayout(self.button_layout)
 
-    def populate_data(self, payload: Dict[str, Any], ai_explanation: Dict[str, str]):
-        """Fills the UI elements with pipeline data."""
-        
+    def populate_data(self, event: Dict[str, Any]):
+        """Fills the UI elements with the canonical final event's data —
+        never computes or infers a risk value itself (Step 6)."""
+        self._event = event
+
+        file_info = event.get("file") or {}
+        risk = event.get("risk") or {}
+        explanation = event.get("explanation") or {}
+
         # 1. Base Info
-        file_name = os.path.basename(payload.get("file_path", "Unknown"))
+        file_name = file_info.get("filename") or "Unknown"
         self.file_label.setText(f"File: {file_name}")
-        
-        risk = payload.get("risk_assessment", {})
-        score = risk.get("risk_score", 0)
-        
-        if score >= 60:
+
+        score = risk.get("score")
+        if isinstance(score, (int, float)) and score >= 60:
             self.risk_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #d32f2f;")
-        elif score >= 20:
+        elif isinstance(score, (int, float)) and score >= 20:
             self.risk_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #f57c00;")
-            
-        self.risk_label.setText(f"Risk Score: {score}")
-        
-        # 2. AI Section or Fallback
-        is_fallback = "unavailable" in ai_explanation.get("ai_summary", "").lower()
-        
+
+        self.risk_label.setText(f"Risk Score: {score if score is not None else 'Unknown'}")
+
+        # 2. AI Section or Fallback — AI unavailability never hides the
+        # deterministic risk reasons that are always shown regardless.
+        ai_summary_text = (explanation.get("ai_summary") or "").lower()
+        is_fallback = (not explanation) or "unavailable" in ai_summary_text or "failed" in ai_summary_text
+
         if is_fallback:
-            self.ai_summary.setText("Risk indicators suggest this file may be unsafe.\nExercise caution before executing.")
+            reasons = risk.get("reasons") or []
+            reasons_text = "\n".join(f"• {r}" for r in reasons) if reasons else "• Risk indicators unavailable"
+            self.ai_summary.setText("AI explanation unavailable.")
             self.threat_title.hide()
             self.threat_explain.hide()
-            self.action_explain.setText("• Do not execute this file\n• Verify the download source\n• Contact your system administrator")
+            self.action_explain.setText(
+                reasons_text + "\n• Do not execute this file\n• Verify the download source\n• Contact your system administrator"
+            )
         else:
             self.threat_title.show()
             self.threat_explain.show()
-            
-            self.ai_summary.setText(ai_explanation.get("ai_summary", "Unknown condition."))
-            self.threat_explain.setText(ai_explanation.get("threat_explanation", "No explanation available."))
-            
-            action_text = ai_explanation.get("recommended_action", "Exercise caution.")
+
+            self.ai_summary.setText(explanation.get("ai_summary", "Unknown condition."))
+            self.threat_explain.setText(explanation.get("threat_explanation", "No explanation available."))
+
+            action_text = explanation.get("recommended_action") or event.get("recommended_action", "Exercise caution.")
             # Format bullets if not already
             if not action_text.strip().startswith("•") and "\n" not in action_text:
                 action_text = f"• {action_text}\n• Contact your system administrator"
             self.action_explain.setText(action_text)
+
+    def _on_review_details(self):
+        if self._event is None:
+            return
+        dialog = AnalysisDetailsDialog(self._event, parent=self)
+        dialog.exec_()
 
 class GuidanceController:
     """
@@ -175,21 +199,26 @@ class GuidanceController:
         
         self.active_dialogs = []
 
-    def trigger(self, payload: Dict[str, Any], ai_explanation: Dict[str, str]):
+    def trigger(self, final_event: Dict[str, Any]):
         """
-        Public entry point. Can be called from any thread safely.
+        Public entry point. Can be called from any thread safely — emitting
+        a Qt signal from a non-GUI thread queues delivery onto whichever
+        thread this QObject (and its underlying QApplication) was
+        constructed on; see DECISIONS.md Step 4 D17 and Step 6.
         Will only trigger on SUSPICIOUS or HIGH_RISK classifications.
+        Receives the same canonical final_event the pipeline persists —
+        there is no separately computed 'UI risk'.
         """
-        classification = payload.get("risk_assessment", {}).get("classification", "SAFE")
+        classification = (final_event.get("risk") or {}).get("level", "SAFE")
         if classification not in ["SUSPICIOUS", "HIGH_RISK"]:
             return
-            
-        self.signals.trigger_alert.emit(payload, ai_explanation)
 
-    def _show_alert(self, payload: Dict[str, Any], ai_explanation: Dict[str, str]):
+        self.signals.trigger_alert.emit(final_event)
+
+    def _show_alert(self, final_event: Dict[str, Any]):
         """Slot executed on the main GUI thread."""
         dialog = EmployeeGuidance()
-        dialog.populate_data(payload, ai_explanation)
+        dialog.populate_data(final_event)
         
         # Keep reference to prevent GC
         self.active_dialogs.append(dialog)
@@ -209,7 +238,7 @@ class GuidanceController:
 # Global singleton for easy thread-safe invocation across the pipeline without passing instances
 _controller_instance = None
 
-def trigger_guidance(payload: Dict[str, Any], ai_explanation: Dict[str, str]):
+def trigger_guidance(final_event: Dict[str, Any]):
     """
     Shows a security warning asynchronously without blocking the calling thread.
     Requires a running QApplication event loop in the main thread (or initializes one silently).
@@ -217,5 +246,5 @@ def trigger_guidance(payload: Dict[str, Any], ai_explanation: Dict[str, str]):
     global _controller_instance
     if _controller_instance is None:
         _controller_instance = GuidanceController()
-        
-    _controller_instance.trigger(payload, ai_explanation)
+
+    _controller_instance.trigger(final_event)
