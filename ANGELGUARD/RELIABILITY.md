@@ -8,6 +8,20 @@ Judgment calls and the resulting code changes are logged, as usual, in
 `DECISIONS.md` (Step 7 section) — this file is the reference table and
 evidence, not the decision log.
 
+**Step 8 addendum (MVP freeze audit):** re-ran everything below under a
+genuinely fresh virtual environment (not the existing `.venv`) — same
+results throughout, no regressions. One additional real finding, not a
+regression of anything in this document: `AnalysisDetailsDialog` treated a
+real `AIExplainer`'s no-client fallback response differently than the
+warning popup did (fixed — see `DECISIONS.md` D42). Two more explicit,
+individually-named tests were added for invariants that were already true
+by construction but hadn't been asserted as their own named check before:
+"AI cannot override the deterministic risk engine" and "risk reasons
+survive persistence" (`DECISIONS.md` D-series, Step 8). Full standalone
+freeze-audit report — repo hygiene, clean-install, fresh-DB, migration
+re-test, startup matrix, UX acceptance walkthrough, git/release state — is
+the final chat deliverable for that step, not duplicated into this file.
+
 No malware was used or executed anywhere in this validation. All adversarial
 inputs are synthetic (hand-built PE fixtures, empty files, malformed data) or
 deterministic mocks of external services.

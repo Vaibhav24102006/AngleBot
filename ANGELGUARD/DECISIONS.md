@@ -914,3 +914,129 @@ Full regression suite after Step 7: **188 passed, 0 failed, 0 skipped**
 (112 going into this step + 76 new across 8 new test files). No real
 database, no real Downloads directory, no network access required by any
 test. Manual demonstration against the real app: see RELIABILITY.md §4.
+
+## STEP 8 — MVP Freeze / Release Candidate Audit
+
+Full report is the standalone deliverable for this step (repo hygiene,
+clean-install verification, fresh-DB test, migration re-test, startup
+matrix, security invariant re-verification, dependency failure matrix,
+UX acceptance test, performance baseline reference, documentation audit,
+git/release state, P0–P1 review). This section covers only the actual
+code/repo changes made in response to what the audit found.
+
+### D40. Repository hygiene: `.env` was still tracked; junk files removed (P1)
+
+D5 (Step 1) claimed `.env` had been `git rm --cached`'d. Re-checking during
+this audit found it was **still tracked** — `git log --follow` showed its
+last real touch was the original pre-Step-1 commit (`047c964`); Step 4's
+commit (`62c537a`) added `.env.example` but never actually committed the
+`.env` removal despite it being staged at the time. Verified the tracked
+content was, as D5 said, all-empty placeholder values — no live secret was
+ever actually exposed — but a tracked `.env` file is a live risk the
+moment anyone fills in a real key locally and runs a bare `git add -A`.
+**Fixed for real this time**: `git rm --cached ANGELGUARD/.env`, verified
+`.gitignore` already covers it (it did), verified post-fix that
+`git ls-files -- ANGELGUARD/.env` returns nothing.
+
+Also found and removed, all confirmed pre-dating this entire multi-step
+effort (not something any of Steps 1–7 created): two empty, contentless
+tracked files (`git`, `main` — almost certainly an accidental shell
+redirect) and five tracked PowerShell error-transcript dumps
+(`err_detail.txt`, `test_int_err.txt`, `test_int_out.txt`,
+`test_output.txt`, `test_ui_out.txt` — UTF-16 garbled console output from
+old ad-hoc test runs, predating even the original `test_threat_intel.py`
+rename in Step 7 D36). Content-reviewed all seven before removal — no
+secrets in any of them, just accidental clutter.
+
+A repo-wide secret-pattern scan (OpenAI/AWS/Slack/GitHub/Google key
+formats, private-key headers, generic high-entropy `key=value` assignments)
+against every tracked file found nothing. Confirmed all 7 pinned runtime
+dependencies (`watchdog`, `pefile`, `psutil`, `PyQt5`, `requests`,
+`python-dotenv`, `openai`) are genuinely imported somewhere in the tracked
+source — no unused production dependency.
+
+### D41. Stale/inaccurate documentation replaced with a real README (P2, fixed anyway)
+
+No `README.md` existed. `STRUCTURE.md` (a pre-Phase-1 scaffold note) and
+`walkthrough_integration.md` (a self-reported "validation" narrative)
+were both tracked, both stale, and both actively **inaccurate** —
+`STRUCTURE.md` referenced a `logging/` module that was renamed to
+`event_logging/` before Step 1 and omitted `pipeline/`, `intelligence/`,
+`threat_intel/`, and `tests/` entirely; `walkthrough_integration.md` made
+specific technical claims that don't match the actual code (e.g. "Timeouts
+are actively restricted to >0.5s delays" — the real defaults are 10s for
+threat intel, 15s for AI) and pre-dates every correctness fix from Step 1
+onward. `create_structure.py` (an orphaned, unreferenced one-time
+`__init__.py`-scaffolding script, also referencing the old `logging/`
+name) was removed for the same reason — not because scaffold scripts are
+inherently bad, but because this one is actively wrong about the current
+layout and nothing in the repo points to it.
+
+**Fix:** removed all three; added `README.md` — architecture diagram
+(matching this step's own diagram), install/run/test instructions verified
+against a genuinely fresh venv (see the audit report), project layout
+table, and a known-limitations summary pointing to `RELIABILITY.md`.
+Per the task's own instruction ("do not change code to match stale docs
+unless P0/P1"), nothing in the codebase was changed to match what the old
+docs claimed — the old docs were simply wrong and are now gone.
+
+### D42. UX-consistency fix found via the acceptance test: AI fallback dict shown inconsistently between popup and details view (P2, fixed)
+
+Running the full UX acceptance flow (launch → drop file → warning →
+Review Details → History → same event) surfaced a real inconsistency, not
+a correctness bug: `ui/employee_guidance.py`'s popup already detects a
+real `AIExplainer`'s fallback response (a populated dict whose
+`ai_summary` says "AI analysis unavailable (client not initialized)." —
+not `None`) via an `is_fallback` substring check, and shows "AI
+explanation unavailable." accordingly (D29). `ui/analysis_details.py`
+only checked `explanation is None`, so the exact same fallback dict was
+instead rendered as if it were genuine AI content — not false information
+(the fallback text does say "unavailable"), but the two views treated
+identical data differently, which the audit's own explicit UX acceptance
+criterion ("no contradiction between warning / details / history /
+database") doesn't quite forgive even when nothing displayed is
+technically false.
+
+**Fix:** `AnalysisDetailsDialog` now uses the same `is_fallback` detection
+as the popup. Covered by a new regression test,
+`test_real_explainer_fallback_dict_is_also_shown_as_unavailable`, in
+`tests/test_history_and_details.py`.
+
+### D43. Fresh-install, fresh-DB, and migration re-verification (no code changes — confirms existing behavior)
+
+Per the audit's explicit requirement to not trust prior test results alone
+for a freeze decision: created a genuinely fresh virtual environment
+(not `.venv`), installed only from `requirements.txt` +
+`requirements-dev.txt`, and confirmed all 188 (then 191, after D42) tests
+pass identically, all 7 runtime imports resolve with no undocumented
+dependency, and `app/main.py` (both `--headless` and default GUI mode)
+starts cleanly. Separately verified — against a real, temporarily-swapped
+copy of the real `data/angelguard_events.db` (backed up before, restored
+after, verified restored row count matched) — that a from-scratch database
+gets the current full 18-column schema, a dropped benign fixture is
+detected/analyzed/persisted/retrieved/shown in history, and a full process
+restart preserves that history. Also re-ran the D-series migration
+behavior against a hand-built pre-Step-5B-schema database under the fresh
+venv specifically (not just the existing automated test) — old row
+preserved verbatim, no `event_id`/`static_analysis` fabricated for it, new
+event afterward gets the full schema, 2 total rows. No defects found; no
+code changed by this verification.
+
+### D44. Findings summary and freeze decision
+
+**P0: none. P1: two found, both fixed this session (D40's `.env` tracking,
+and — carried over from the original discovery point — nothing new beyond
+what Step 7 already fixed).** P2: D41 (stale docs) and D42 (UX
+inconsistency) were both found and fixed anyway despite not being
+strictly required. Remaining P2/P3 items are exactly those already listed
+in `RELIABILITY.md` §1 and this log's D39 — re-reviewed during this audit,
+none escalated, none newly discovered beyond D40–D42.
+
+Full regression suite after Step 8: **191 passed, 0 failed, 0 skipped**
+(188 going into this step + 3 new: 2 additional named security-invariant
+tests in D-series above, 1 UX-consistency regression test).
+
+**ANGELGUARD Core MVP: FROZEN.** See the standalone Step 8 audit report
+for the complete release-candidate deliverable (test baseline, security
+status, installation status, database status, UX status, documentation
+status, and the frozen commit hash).

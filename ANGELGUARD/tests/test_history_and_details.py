@@ -127,6 +127,29 @@ class TestAIUnavailableInDetailsView:
         all_text = _all_label_text(dialog)
         assert "AI explanation unavailable." in all_text
 
+    def test_real_explainer_fallback_dict_is_also_shown_as_unavailable(self):
+        """Step 8 MVP-freeze audit finding: a real AIExplainer with no
+        client configured returns a populated fallback dict (not None) —
+        e.g. ai_summary='AI analysis unavailable (client not initialized).'
+        This must render the same 'AI explanation unavailable.' message as
+        the None case, matching ui/employee_guidance.py's popup, which
+        already detects this exact fallback shape. Before this fix, the
+        details view showed the fallback dict as if it were genuine AI
+        content — not false information, but inconsistent with the popup."""
+        event = _final_event(
+            "evt-fallback-ai", "sample.exe", 40, "SUSPICIOUS",
+            explanation={
+                "ai_summary": "AI analysis unavailable (client not initialized).",
+                "threat_explanation": "The AI service could not generate a threat explanation.",
+                "recommended_action": "Exercise caution before executing this file.",
+                "confidence": "unknown",
+            },
+        )
+        dialog = AnalysisDetailsDialog(event)
+        all_text = _all_label_text(dialog)
+        assert "AI explanation unavailable." in all_text
+        assert "The AI service could not generate" not in all_text  # not shown as genuine content
+
 
 def _all_label_text(widget) -> str:
     from PyQt5.QtWidgets import QLabel

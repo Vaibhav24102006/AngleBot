@@ -163,7 +163,16 @@ class AnalysisDetailsDialog(QDialog):
 
         layout.addWidget(self._divider())
         layout.addWidget(_section_label("AI EXPLANATION"))
-        if not explanation:
+        # A real AIExplainer with no client configured (no API key) still
+        # returns a populated dict — its own fallback response — not None.
+        # Treat that the same as "no explanation at all" rather than
+        # rendering fallback boilerplate as if it were genuine AI content;
+        # matches the same is_fallback detection ui/employee_guidance.py's
+        # popup already uses, so the two views never disagree about
+        # whether AI was actually available.
+        ai_summary_text = (explanation or {}).get("ai_summary", "")
+        is_fallback = (not explanation) or "unavailable" in ai_summary_text.lower() or "failed" in ai_summary_text.lower()
+        if is_fallback:
             layout.addWidget(_kv_label("AI explanation unavailable."))
         else:
             layout.addWidget(_kv_label(f"Summary: {explanation.get('ai_summary', 'Not available')}"))

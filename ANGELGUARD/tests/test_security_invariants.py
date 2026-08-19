@@ -13,6 +13,14 @@ accidentally regress:
    "clean"/"safe" verdict.
 5. event_id identity is preserved across pipeline -> persistence ->
    retrieval -> UI.
+6. AI cannot override the deterministic risk engine's score/classification.
+7. Risk reasons survive persistence (round-trip through the real db).
+
+Added to (6) and (7) during the Step 8 MVP-freeze audit — the first five
+were already covered; these two were true by construction (AI receives
+risk as an input, never writes it back; Step 5B/6 already round-trip
+reasons) but hadn't been asserted as their own explicit, named invariant
+until now.
 """
 import os
 import sys
@@ -191,3 +199,56 @@ class TestEventIdentityAcrossFullRoundTrip:
         dialog = AnalysisDetailsDialog(retrieved)
         shown_text = "\n".join(l.text() for l in dialog.findChildren(QLabel))
         assert pipeline_event_id in shown_text
+
+
+class TestAICannotOverrideDeterministicRisk:
+    def test_ai_explanation_content_never_changes_the_risk_score_or_classification(self, tmp_path):
+        """The AI explainer is only ever handed risk as an INPUT (via the
+        aggregator payload) and only ever contributes explanation text and
+        a recommended-action string — it has no write path back into
+        risk.score/risk.level. A hostile/wrong AI response must not be
+        able to change what the deterministic engine already decided."""
+        class AdversarialAIExplainer:
+            """Returns a fabricated 'SAFE'-sounding explanation for what is
+            actually a SUSPICIOUS file — proving the pipeline doesn't let
+            AI wording leak into the actual classification."""
+            def generate_explanation(self, payload):
+                return {
+                    "ai_summary": "This file is completely safe and clean, no action needed.",
+                    "threat_explanation": "Nothing to worry about.",
+                    "recommended_action": "No action needed.",
+                    "confidence": "high",
+                }
+
+        path = tmp_path / "susp.exe"
+        path.write_bytes(make_suspicious_import_pe_bytes())
+        pipeline = AnalysisPipeline(ai_explainer=AdversarialAIExplainer())
+
+        event = pipeline.analyze_and_decide(str(path))
+
+        # The deterministic engine's own numbers are untouched...
+        assert event["risk"]["score"] == 20
+        assert event["risk"]["level"] == "SUSPICIOUS"
+        assert event["risk"]["reasons"] == ["Suspicious import detected (2 imports)"]
+        # ...even though the AI's (fabricated, adversarial) text made it
+        # into the explanation/recommendation fields, which are always
+        # shown alongside — never in place of — the real score/level.
+        assert "safe" in event["explanation"]["ai_summary"].lower()
+        assert event["recommended_action"] == "No action needed."
+
+
+class TestRiskReasonsSurvivePersistence:
+    def test_specific_reasons_are_byte_identical_after_a_real_db_round_trip(self, tmp_path):
+        db_path = str(tmp_path / "reasons.db")
+        logger = AdminEventLogger(db_path=db_path)
+        path = tmp_path / "susp.exe"
+        path.write_bytes(make_suspicious_import_pe_bytes())
+
+        pipeline = AnalysisPipeline(persistence=logger)
+        event = pipeline.analyze_and_decide(str(path))
+        original_reasons = event["risk"]["reasons"]
+        assert original_reasons  # sanity: there actually are reasons to lose
+
+        retrieved = logger.get_event(event["event_id"])
+
+        assert retrieved["risk"]["reasons"] == original_reasons
