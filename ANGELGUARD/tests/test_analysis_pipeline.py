@@ -71,8 +71,8 @@ class FakePersistence:
         self._returns = returns
         self.calls = []
 
-    def log_event(self, payload, explanation):
-        self.calls.append((payload, explanation))
+    def log_event(self, final_event):
+        self.calls.append(final_event)
         if self._raises:
             raise self._raises
         return self._returns
@@ -109,6 +109,11 @@ class TestHappyPath:
         assert event["recommended_action"] == "fake recommended action"
         assert event["persistence_error"] is None
         assert event["guidance_triggered"] is True
+        # Persistence receives the canonical final event itself — including
+        # event_id — not the intermediate aggregator payload (Step 5B).
+        assert len(persistence.calls) == 1
+        assert persistence.calls[0]["event_id"] == event["event_id"]
+        assert persistence.calls[0] is event
 
     def test_safe_file_skips_ai_but_still_persists_and_does_not_trigger_guidance(self, tmp_path):
         path = _write(tmp_path, "clean.exe", make_valid_pe_bytes())

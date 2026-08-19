@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 data/*.db
+tests/data/*.db
 monitor_logs.txt
 .venv/
 .env

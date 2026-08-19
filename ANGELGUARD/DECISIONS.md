@@ -302,6 +302,17 @@ timestamp, file path, hash, risk score/classification, threat-intel
 fields, and the AI fallback summary — into `data/angelguard_events.db`'s
 `threat_events` table (see Step 4 manual demonstration, below).
 
+**Correction (Step 5 audit, superseded by Step 5B):** "accepts exactly the
+shape ... already produce[s], with zero adapter code needed" overstated
+what actually reached storage. `AdminEventLogger` accepted a richer
+*input* than `log_service` did, but persisted a *narrower schema* than the
+pipeline actually computed — risk reasons, the full static-analysis
+detail, the full threat-intelligence dict, and two of four AI-explanation
+fields were silently dropped, and the pipeline's own `event_id` was never
+passed to persistence at all. See Step 5's audit and Step 5B (D21) for the
+fix. Left here uncorrected-in-place, not rewritten, per this log's own
+rule of keeping historical decisions intact rather than rewriting history.
+
 ### D17. Guidance wiring and why `app/main.py` polls instead of blocking on `app.exec_()`
 
 `ui/employee_guidance.py`'s `GuidanceController` uses Qt signals to be
@@ -388,3 +399,163 @@ string), while `None`/`True`/no return value all mean success, so a
 backend with no return value isn't misreported as failing. Covered by a
 new test, `test_persistence_returning_false_is_also_observable`, alongside
 the existing raises-based test. No other behavior changed.
+
+## STEP 5 — Database & Event Model Audit
+
+Code-only audit of every SQLite database/table in the project. No
+migration performed in this step — see the full audit report delivered
+separately for the complete inventory, MVP event trace, identity/key
+relationship analysis, concurrency inspection, and target-architecture
+recommendation. Summary of what it established (all verified against code,
+not prior documentation):
+
+- Exactly **2** physical `.db` files exist: `data/angelguard_events.db`
+  (`threat_events`, the live MVP sink) and `data/guardian_logs.db` (shared
+  by `analysis_logs` — dead code, never called — plus Phase 7's
+  `behavior_events`/`network_events`/`correlation_events`/`snapshots`,
+  reachable only through the separate, unwired `ui/main_window.py` entry
+  point, never from `app/main.py`).
+- No identity relationship exists between the MVP's `threat_events` and
+  any Phase 7 table — neither side stores a key the other could join on.
+- The MVP path had two P1 defects (see D16's correction, above): the
+  pipeline's `event_id` was never persisted, and the stored row dropped
+  most of the canonical event's content. Fixed in Step 5B (D21-D23).
+- No WAL/transaction tuning anywhere in the codebase; not a real risk on
+  the current MVP path (`threat_events` has exactly one writer, zero
+  readers, called serially from one thread) — only a latent risk if Phase
+  7's separate `main_window.py` entry point is ever run, which was
+  explicitly out of scope to fix here.
+- Regression tests proving the two P1 defects were committed as
+  `tests/test_persistence_audit.py` at commit `66036b2`, establishing the
+  pre-migration baseline before Step 5B touched anything.
+
+**Decision:** Option C — transitional. Widen `threat_events`' schema
+in-place (additive migration) rather than consolidating with
+`guardian_logs.db`; leave Phase 7's tables completely untouched, since
+they track a structurally different kind of event (OS-level
+process/network activity, not file analysis) and aren't even wired into
+the MVP yet. Forcing a shared schema now would be exactly the kind of
+speculative expansion the project's guidance repeatedly warns against.
+
+## STEP 5B — Transitional Persistence Model
+
+### D21. `threat_events` schema: additive migration, JSON columns for nested data
+
+`event_logging/admin_event_logger.py`'s `_migrate_schema()` runs on every
+`AdminEventLogger()` construction (fresh or pre-existing database alike —
+one migration code path, not two) and adds, via `ALTER TABLE ADD COLUMN`
+only:
+
+```
+event_id TEXT                    -- UNIQUE-indexed (see D22)
+file_size INTEGER
+risk_reasons TEXT                -- JSON array
+static_analysis_json TEXT        -- JSON object, the full analyzer output
+threat_intelligence_json TEXT    -- JSON object, the full TI result
+explanation_json TEXT            -- JSON object or NULL
+recommended_action TEXT
+analysis_status TEXT
+```
+
+The original 10 columns (Phase 6.5) are untouched — old rows keep their
+exact original data, and the new columns are `NULL` for them (no
+fabricated history). JSON text columns were chosen over normalizing
+`static_analysis`/`threat_intelligence`/`explanation` into relational
+columns per the task's own framing: this data is inherently nested, has
+no query requirement today that would justify dozens of columns, and
+`log_service.py` already established the JSON-column-for-nested-data
+pattern for `reasons` before this step. `json.dumps(..., sort_keys=True)`
+is used throughout for deterministic serialization.
+
+Verified against a hand-built pre-Step-5B-schema database (bypassing
+`AdminEventLogger` entirely to construct it) in
+`tests/test_admin_logger.py::TestSchemaMigrationFromLegacyDatabase`: the
+old row survives with its original data intact, new columns are `NULL`
+for it, and a new event logged afterward gets the full schema — both rows
+coexist.
+
+### D22. `event_id` identity: UNIQUE index, idempotent upsert on duplicate
+
+`event_id` is not declared `UNIQUE` inline (SQLite's `ALTER TABLE ADD
+COLUMN` doesn't support inline `UNIQUE`/`PRIMARY KEY` constraints); a
+separate `CREATE UNIQUE INDEX IF NOT EXISTS idx_threat_events_event_id ON
+threat_events(event_id)` achieves the same enforcement. A plain (non-partial)
+unique index was sufficient rather than a `WHERE event_id IS NOT NULL`
+partial index: SQL treats `NULL <> NULL`, so SQLite's own `UNIQUE`
+semantics already let any number of historical `NULL`-`event_id` rows
+coexist without conflict — verified by
+`test_events_without_event_id_do_not_collide`.
+
+**Duplicate `event_id` behavior: idempotent (last write wins), not
+rejected and not silently ignored.** `log_event()` uses
+`INSERT ... ON CONFLICT(event_id) DO UPDATE SET ...`. Chosen because an
+analysis event is naturally re-derivable from its own `event_id` — if a
+caller (a future retry path, or a test) logs the same event twice, the
+second write should reflect the more recent state, not create a
+phantom-duplicate row that `list_events()` would then show twice for one
+underlying analysis. Verified by
+`test_duplicate_event_id_is_idempotent_not_duplicated`: exactly one row
+exists after two writes with the same `event_id`, and its contents match
+the second (later) write.
+
+### D23. Persistence boundary: the canonical `final_event`, not the aggregator `payload`
+
+`AnalysisPipeline._run_persistence` now takes `final_event` — the exact
+dict object `analyze_and_decide()` returns to its caller — instead of the
+aggregator's intermediate `payload`. This is the one change that makes
+`event_id` reach storage at all: `payload` (built by
+`intelligence_aggregator.aggregate_intelligence()`) never had an
+`event_id` key; only the pipeline's own `_build_final_event()` does.
+`final_event["persistence_error"]` and `["guidance_triggered"]` are
+assigned *after* the persistence call returns, so the object actually
+persisted never contains those two pipeline-internal bookkeeping fields —
+there is exactly one canonical event object, mutated in place, not two
+separately constructed representations (verified by
+`persistence.calls[0] is event` in
+`test_full_pipeline_produces_correct_canonical_event`). Guidance wiring
+(`_run_guidance`) deliberately still receives the aggregator `payload`,
+unchanged — Step 5B's scope was persistence only; `ui/employee_guidance.py`
+consumes the `payload`'s `risk_assessment` shape and touching that would
+be an unrelated GUI change outside this step.
+
+### D24. Retrieval API: `get_event(event_id)` / `list_events(limit=50)`
+
+Neither existed before Step 5B — the audit found `AdminEventLogger` was a
+write-only sink. Both return the same canonical shape
+`_build_final_event()` produces (decoding the JSON columns back into
+nested dicts/lists), so a caller can't tell whether an event came from a
+live pipeline run or was reloaded from storage. `list_events()` is a flat,
+unfiltered, most-recent-first query with a default `LIMIT 50` — no
+filtering/paging framework, per the task's explicit "keep it minimal"
+instruction; the MVP has no history UI yet to justify more.
+
+### D25. Regression tests updated in place, not left asserting stale behavior
+
+`tests/test_persistence_audit.py`'s two tests originally proved the two
+defects this step fixes (`event_id` not persisted; most of the canonical
+event dropped). Per this project's established practice for a
+deliberately corrected public contract (D13), they were updated in place
+to verify the fix rather than left permanently asserting the "before"
+state — which is not lost, since it's preserved exactly in git commit
+`66036b2`. `tests/test_admin_logger.py` and the three `log_event(...)`
+call sites in `tests/test_integration.py` were likewise updated for the
+new single-argument `log_event(final_event)` contract; `FakePersistence`
+in `tests/test_analysis_pipeline.py` similarly changed from a
+`(payload, explanation)` two-arg fake to a single-`final_event`-arg one.
+None of these changes weaken what's being asserted — each new assertion
+checks strictly more than what it replaced (e.g. round-trip equality
+through `get_event()`, not just raw-SQL column presence).
+
+Full suite after Step 5B: **100 passed, 0 failed, 0 skipped** (93 going
+into this step + 5 new `test_admin_logger.py` cases +
+2 unchanged-in-count `test_persistence_audit.py` cases, updated in place
+per D25).
+
+### D26. Left untouched (per Step 5B's explicit scope)
+
+`guardian_logs.db` and all four Phase 7 tables, `logging_bak/log_service.py`,
+WAL/concurrency tuning (the audit found no real risk on the current
+single-writer MVP path — deferred until Phase 7 is actually wired into the
+same persistence architecture, not before), and `ui/employee_guidance.py`
+/ `ui/main_window.py`. No ML, no GUI redesign, no new threat-intel or AI
+providers.

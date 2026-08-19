@@ -1,23 +1,20 @@
 """
-Step 5 — persistence audit validation.
+Step 5 / 5B — persistence audit validation.
 
-These tests do not test new behavior; they PROVE two findings from the
-Step 5 database/event-model audit against the real, unmodified
-AnalysisPipeline + AdminEventLogger, so the audit's claims are verifiable
-rather than asserted from reading alone:
+These tests originally PROVED two defects the Step 5 database/event-model
+audit found against the real, unmodified AnalysisPipeline + AdminEventLogger
+(see git commit 66036b2, "test: add persistence audit regression coverage",
+for that pre-migration baseline — event_id was not persisted, and the
+stored row dropped risk reasons / full static analysis / full threat
+intelligence / part of the AI explanation).
 
-1. The pipeline's own `event_id` (a uuid, generated in
-   AnalysisPipeline.analyze_and_decide) is never passed to persistence and
-   never stored anywhere in `threat_events` — there is no column for it,
-   and no other stored column reproduces it. A caller holding only the
-   returned event has no query path back to its own row.
-
-2. `AdminEventLogger`'s `threat_events` schema is narrower than the
-   canonical final event: risk reasons, the full static_analysis dict, the
-   full threat_intelligence dict, and two of the four AI explanation
-   fields (threat_explanation, recommended_action) are all computed by the
-   pipeline but never persisted. The stored row cannot reconstruct the
-   full analysis.
+Step 5B deliberately corrected AdminEventLogger's persisted schema and the
+pipeline's persistence boundary to fix exactly those two defects (see
+DECISIONS.md Step 5B, D21). Per this project's established practice for a
+deliberately corrected public contract (see D13), these tests are updated
+in place to verify the fix rather than left asserting the now-superseded
+"before" behavior — which is preserved permanently in commit 66036b2, not
+lost by this edit.
 
 Uses a temp db path (tmp_path) exclusively — never the real
 data/angelguard_events.db, matching the convention already established in
@@ -59,7 +56,11 @@ def _write_suspicious_exe(tmp_path):
     return str(path)
 
 
-def test_event_id_is_not_persisted_anywhere_in_threat_events(tmp_path):
+def test_event_id_is_now_persisted_and_retrievable(tmp_path):
+    """Was test_event_id_is_not_persisted_anywhere_in_threat_events prior to
+    Step 5B (see commit 66036b2) — event_id now has a real, UNIQUE-indexed
+    column, and the pipeline's own returned uuid is exactly what a caller
+    can look the row back up by."""
     db_path = str(tmp_path / "audit.db")
     logger = AdminEventLogger(db_path=db_path)
     pipeline = AnalysisPipeline(
@@ -73,16 +74,28 @@ def test_event_id_is_not_persisted_anywhere_in_threat_events(tmp_path):
 
     conn = sqlite3.connect(db_path)
     columns = [row[1] for row in conn.execute("PRAGMA table_info(threat_events)")]
-    assert "event_id" not in columns
+    assert "event_id" in columns
 
-    row = conn.execute("SELECT * FROM threat_events").fetchone()
+    row = conn.execute(
+        "SELECT event_id FROM threat_events WHERE event_id = ?", (event["event_id"],)
+    ).fetchone()
     conn.close()
 
-    # The uuid returned to the caller appears nowhere in the stored row.
-    assert event["event_id"] not in row
+    assert row is not None
+    assert row[0] == event["event_id"]
+
+    # And retrievable through the logger's own API, not just raw SQL.
+    retrieved = logger.get_event(event["event_id"])
+    assert retrieved is not None
+    assert retrieved["event_id"] == event["event_id"]
 
 
-def test_stored_row_loses_reasons_static_analysis_and_partial_explanation(tmp_path):
+def test_stored_row_now_preserves_reasons_static_analysis_and_full_explanation(tmp_path):
+    """Was test_stored_row_loses_reasons_static_analysis_and_partial_explanation
+    prior to Step 5B (see commit 66036b2) — threat_events gained JSON
+    columns for exactly the data that used to be dropped, and log_event now
+    receives the canonical final event (not the narrower aggregator
+    payload), so all of it actually reaches storage."""
     db_path = str(tmp_path / "audit.db")
     logger = AdminEventLogger(db_path=db_path)
     pipeline = AnalysisPipeline(
@@ -93,22 +106,16 @@ def test_stored_row_loses_reasons_static_analysis_and_partial_explanation(tmp_pa
 
     event = pipeline.analyze_and_decide(_write_suspicious_exe(tmp_path))
 
-    # The canonical event actually has this richer data available...
     assert event["risk"]["reasons"]
     assert event["static_analysis"].get("suspicious_imports") or event["static_analysis"].get("num_suspicious_imports")
     assert event["explanation"]["threat_explanation"] == "fake threat explanation"
     assert event["explanation"]["recommended_action"] == "fake recommended action"
 
-    # ...but none of it survives into the persisted row: threat_events only
-    # has columns for id/timestamp/file_path/file_hash/risk_score/
-    # classification/virus_total_detections/malware_family/ai_summary/confidence.
-    conn = sqlite3.connect(db_path)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(threat_events)")}
-    conn.close()
+    retrieved = logger.get_event(event["event_id"])
 
-    assert columns == {
-        "id", "timestamp", "file_path", "file_hash", "risk_score", "classification",
-        "virus_total_detections", "malware_family", "ai_summary", "confidence",
-    }
-    # No column exists to hold: risk reasons, static_analysis detail,
-    # threat_explanation, recommended_action, or the full threat_intelligence dict.
+    # All of it now survives the round trip through storage.
+    assert retrieved["risk"]["reasons"] == event["risk"]["reasons"]
+    assert retrieved["static_analysis"] == event["static_analysis"]
+    assert retrieved["threat_intelligence"] == event["threat_intelligence"]
+    assert retrieved["explanation"]["threat_explanation"] == "fake threat explanation"
+    assert retrieved["explanation"]["recommended_action"] == "fake recommended action"

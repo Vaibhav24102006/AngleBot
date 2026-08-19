@@ -12,6 +12,38 @@ from ai.ai_explainer import AIExplainer
 from ui.employee_guidance import GuidanceController
 from event_logging.admin_event_logger import AdminEventLogger
 
+
+def _to_final_event(payload, explanation):
+    """AdminEventLogger.log_event() takes the pipeline's canonical final
+    event (Step 5B), not the intermediate aggregator payload these
+    module-chaining tests otherwise deal in. This mirrors
+    AnalysisPipeline._build_final_event's shape closely enough for
+    persistence purposes without pulling AnalysisPipeline itself into a
+    test that's deliberately exercising the raw module chain."""
+    risk = payload.get("risk_assessment", {})
+    file_path = payload.get("file_path")
+    return {
+        "event_id": f"test-{file_path}",
+        "timestamp": payload.get("timestamp", ""),
+        "file": {
+            "path": file_path,
+            "filename": os.path.basename(file_path) if file_path else None,
+            "size": payload.get("static_analysis", {}).get("file_size"),
+            "sha256": payload.get("hash"),
+        },
+        "static_analysis": payload.get("static_analysis", {}),
+        "risk": {
+            "score": risk.get("risk_score"),
+            "level": risk.get("classification"),
+            "reasons": risk.get("reasons", []),
+        },
+        "threat_intelligence": payload.get("threat_intelligence", {}),
+        "explanation": explanation or None,
+        "recommended_action": "See explanation" if explanation else "Review manually",
+        "analysis_status": "completed",
+    }
+
+
 class TestAngelGuardIntegration(unittest.TestCase):
     def setUp(self):
         # Setup Test DB
@@ -57,7 +89,7 @@ class TestAngelGuardIntegration(unittest.TestCase):
             mock_show.assert_not_called()
         
         # Logged to DB
-        self.logger.log_event(payload, explanation or {})
+        self.logger.log_event(_to_final_event(payload, explanation))
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -91,7 +123,7 @@ class TestAngelGuardIntegration(unittest.TestCase):
             classification = payload.get("risk_assessment", {}).get("classification")
             self.assertTrue(classification in ["SUSPICIOUS", "HIGH_RISK"])
         
-        self.logger.log_event(payload, explanation)
+        self.logger.log_event(_to_final_event(payload, explanation))
 
     @patch('ui.employee_guidance.QApplication')
     @patch('ui.employee_guidance.EmployeeGuidance')
@@ -114,8 +146,8 @@ class TestAngelGuardIntegration(unittest.TestCase):
             classification = payload.get("risk_assessment", {}).get("classification")
             self.assertTrue(classification in ["SUSPICIOUS", "HIGH_RISK"])
         
-        self.logger.log_event(payload, explanation)
-        
+        self.logger.log_event(_to_final_event(payload, explanation))
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT virus_total_detections, malware_family FROM threat_events WHERE classification='HIGH_RISK'")

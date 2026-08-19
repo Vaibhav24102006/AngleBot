@@ -120,7 +120,7 @@ class AnalysisPipeline:
         explanation = self._run_ai_explanation(payload)
 
         final_event = self._build_final_event(event_id, payload, explanation, "completed")
-        final_event["persistence_error"] = self._run_persistence(payload, explanation)
+        final_event["persistence_error"] = self._run_persistence(final_event)
         final_event["guidance_triggered"] = self._run_guidance(payload, explanation)
 
         return final_event
@@ -152,9 +152,15 @@ class AnalysisPipeline:
             logger.warning(f"[Pipeline] AI explanation failed, continuing without it: {exc}")
             return None
 
-    def _run_persistence(self, payload: Dict[str, Any], explanation: Optional[Dict[str, str]]) -> Optional[str]:
+    def _run_persistence(self, final_event: Dict[str, Any]) -> Optional[str]:
         """Returns None on success, or an observable error string on failure.
         The analysis result itself is always returned to the caller regardless.
+
+        Persists the canonical final event itself — not the intermediate
+        aggregator payload — so event_id and the full analysis detail
+        (risk reasons, static analysis, threat intelligence, explanation)
+        actually reach storage instead of being silently dropped. See
+        DECISIONS.md Step 5B.
 
         Two failure contracts are handled: a persistence backend that raises
         (e.g. a test fake), and one — like the real AdminEventLogger — that
@@ -165,7 +171,7 @@ class AnalysisPipeline:
         if self._persistence is None:
             return None
         try:
-            result = self._persistence.log_event(payload, explanation or {})
+            result = self._persistence.log_event(final_event)
             if result is False:
                 logger.error("[Pipeline] Persistence backend reported failure logging analysis event.")
                 return "Persistence backend reported failure (see logs for details)"
