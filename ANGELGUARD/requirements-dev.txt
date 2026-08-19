@@ -1,0 +1,4 @@
+# Test/dev-only dependencies. Not needed to run ANGELGUARD itself.
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+# Run the suite with: pytest   (from the ANGELGUARD/ directory)
+pytest==9.1.1

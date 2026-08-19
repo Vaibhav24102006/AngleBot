@@ -10,7 +10,7 @@ and BehaviorCorrelator (7C) lifecycles.
 import sys
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QPalette, QColor
-from PyQt5.QtCore import Qt, QThread
+from PyQt5.QtCore import Qt, QThread, QObject
 from ui.employee_dashboard import EmployeeDashboard
 from behavior.process_monitor import ProcessMonitor
 from network.network_monitor import NetworkMonitor

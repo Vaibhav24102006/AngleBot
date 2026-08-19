@@ -1,5 +1,11 @@
-psutil
-PyQt5
-requests
-python-dotenv
-openai
+# ANGELGUARD runtime dependencies.
+# Pinned to the versions verified against this codebase (see DECISIONS.md).
+# Regenerate this comment block if you intentionally bump a version.
+
+watchdog==6.0.0        # analysis/monitor: filesystem event monitoring (monitor/monitor_service.py)
+pefile==2024.8.26       # analysis/static_analyzer.py: PE parsing
+psutil==7.2.2           # behavior/process_monitor.py, network/network_monitor.py, dynamic/snapshot_service.py
+PyQt5==5.15.11          # ui/*: desktop GUI
+requests==2.34.2        # threat_intel/threat_intel_client.py: VirusTotal / MalwareBazaar HTTP calls
+python-dotenv==1.2.3    # config/settings.py: .env loading
+openai==3.2.0           # ai/ai_explainer.py: AI explanation generation (optional at runtime)

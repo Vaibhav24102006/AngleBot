@@ -1,4 +1,6 @@
-__pycache__/ 
-*.pyc 
-data/*.db 
-monitor_logs.txt 
+__pycache__/
+*.pyc
+data/*.db
+monitor_logs.txt
+.venv/
+.env

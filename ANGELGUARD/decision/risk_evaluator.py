@@ -59,3 +59,22 @@ def evaluate_risk(analysis_result: Dict[str, Any]) -> Tuple[int, str, List[str]]
         reasons.append("No suspicious indicators found")
 
     return score, classification, reasons
+
+
+def evaluate_risk_as_dict(analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Canonical dict-shaped risk result, for downstream consumers (the
+    intelligence aggregator, logging, the UI) that expect a single dict
+    rather than positional tuple unpacking. This is a pure adapter around
+    evaluate_risk() — the scoring algorithm itself is untouched, and every
+    existing caller/test of evaluate_risk() is unaffected.
+
+    Returns:
+        {"risk_score": int, "classification": str, "reasons": List[str]}
+    """
+    score, classification, reasons = evaluate_risk(analysis_result)
+    return {
+        "risk_score": score,
+        "classification": classification,
+        "reasons": reasons,
+    }

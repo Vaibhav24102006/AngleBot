@@ -1,16 +1,17 @@
 """
-Test script for feature extractor.
+Manual CLI diagnostic script for the feature extractor — NOT an automated test.
+(Automated coverage for analysis/static_analyzer.py lives in tests/test_static_analyzer.py.)
 
-This script tests the feature extraction module by:
+This script exercises the feature extraction module by:
 1. Running static analysis on a PE file
 2. Extracting features from the analysis result
 3. Displaying the ML-ready feature vector
 
 Usage:
-    python analysis/test_feature_extractor.py <path_to_exe_file>
+    python analysis/manual_feature_check.py <path_to_exe_file>
 
 Example:
-    python analysis/test_feature_extractor.py C:/Windows/System32/notepad.exe
+    python analysis/manual_feature_check.py C:/Windows/System32/notepad.exe
 """
 
 import sys
@@ -29,9 +30,9 @@ from analysis.feature_extractor import extract_features, features_to_vector, get
 def main():
     """Main test function."""
     if len(sys.argv) < 2:
-        print("Usage: python analysis/test_feature_extractor.py <path_to_exe_file>")
+        print("Usage: python analysis/manual_feature_check.py <path_to_exe_file>")
         print("\nExample:")
-        print("  python analysis/test_feature_extractor.py C:/Windows/System32/notepad.exe")
+        print("  python analysis/manual_feature_check.py C:/Windows/System32/notepad.exe")
         sys.exit(1)
     
     file_path = sys.argv[1]

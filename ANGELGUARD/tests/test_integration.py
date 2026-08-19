@@ -36,7 +36,11 @@ class TestAngelGuardIntegration(unittest.TestCase):
     @patch('ui.employee_guidance.EmployeeGuidance')
     def test_scenario_1_safe_file(self, MockDialog, MockApp):
         """Test 1 - SAFE file pipeline."""
-        static = {"file_path": "notepad.exe", "hash": "safehash", "entropy": 4.1, "num_suspicious_imports": 0, "packed": False}
+        static = {
+            "file_path": "notepad.exe", "hash": "safehash", "file_size": 512000,
+            "num_suspicious_imports": 0, "high_entropy_sections": 0,
+            "sections": [{"name": ".text", "entropy": 4.1, "size": 4096}],
+        }
         risk = {"risk_score": 0, "classification": "SAFE", "reasons": ["Clean"]}
         ti = {"status": "unknown"}
         
@@ -66,7 +70,12 @@ class TestAngelGuardIntegration(unittest.TestCase):
     @patch('ui.employee_guidance.EmployeeGuidance')
     def test_scenario_2_suspicious_file(self, MockDialog, MockApp):
         """Test 2 - Suspicious File pipeline."""
-        static = {"file_path": "fake_tool.exe", "hash": "susphash", "entropy": 7.5, "num_suspicious_imports": 3, "packed": True}
+        static = {
+            "file_path": "fake_tool.exe", "hash": "susphash", "file_size": 81920,
+            "num_suspicious_imports": 3, "high_entropy_sections": 1,
+            "sections": [{"name": ".text", "entropy": 3.2, "size": 4096},
+                          {"name": ".rdata", "entropy": 7.5, "size": 2048}],
+        }
         risk = {"risk_score": 65, "classification": "SUSPICIOUS", "reasons": ["Packed"]}
         ti = {"status": "unknown"}
         
@@ -88,7 +97,11 @@ class TestAngelGuardIntegration(unittest.TestCase):
     @patch('ui.employee_guidance.EmployeeGuidance')
     def test_scenario_3_known_malware(self, MockDialog, MockApp):
         """Test 3 - Known Malware Hash pipeline."""
-        static = {"file_path": "malware.exe", "hash": "44d88612fea8a8f36de82e1278abb02f", "entropy": 7.9}
+        static = {
+            "file_path": "malware.exe", "hash": "44d88612fea8a8f36de82e1278abb02f",
+            "file_size": 45056, "num_suspicious_imports": 5, "high_entropy_sections": 1,
+            "sections": [{"name": ".text", "entropy": 7.9, "size": 4096}],
+        }
         risk = {"risk_score": 90, "classification": "HIGH_RISK", "reasons": ["High Entropy"]}
         ti = {"virus_total_detections": 55, "virus_total_total_engines": 70, "malwarebazaar_match": True, "malware_family": "WannaCry"}
         

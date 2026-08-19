@@ -117,6 +117,7 @@ def analyze_file(file_path: str) -> Dict[str, Any]:
     Returns:
         Structured dictionary containing all analysis results:
         {
+            "file_path": str,
             "file_size": int,
             "hash": str,
             "total_imports": int,
@@ -128,15 +129,22 @@ def analyze_file(file_path: str) -> Dict[str, Any]:
             "sections": List[Dict],
             "error": Optional[str]
         }
-        
+
         If file is not a valid PE:
         {
+            "file_path": str,
             "error": "Not a valid PE file",
             "file_size": int,
             "hash": str
         }
+
+        "file_path" is always the exact value passed in, unchanged, so the
+        result dict is self-describing for any downstream consumer that
+        only has the dict (e.g. intelligence_aggregator) and not the
+        original call site.
     """
     result = {
+        "file_path": file_path,
         "file_size": 0,
         "hash": "",
         "total_imports": 0,

@@ -1,11 +1,12 @@
 """
-Test script for static analyzer.
+Manual CLI diagnostic script for the static analyzer — NOT an automated test.
+(Automated coverage for analysis/static_analyzer.py lives in tests/test_static_analyzer.py.)
 
 Usage:
-    python analysis/test_static.py <path_to_exe_file>
+    python analysis/manual_static_check.py <path_to_exe_file>
 
 Example:
-    python analysis/test_static.py C:\Users\user\Downloads\test.exe
+    python analysis/manual_static_check.py C:/Users/user/Downloads/test.exe
 """
 
 import sys
@@ -23,9 +24,9 @@ from analysis.static_analyzer import analyze_file, get_analysis_summary
 def main():
     """Main test function."""
     if len(sys.argv) < 2:
-        print("Usage: python analysis/test_static.py <path_to_exe_file>")
+        print("Usage: python analysis/manual_static_check.py <path_to_exe_file>")
         print("\nExample:")
-        print("  python analysis/test_static.py C:/Users/user/Downloads/notepad.exe")
+        print("  python analysis/manual_static_check.py C:/Users/user/Downloads/notepad.exe")
         sys.exit(1)
     
     file_path = sys.argv[1]
