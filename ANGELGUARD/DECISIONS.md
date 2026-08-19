@@ -752,3 +752,165 @@ surface from Step 6's own spec is served by the existing (now-updated)
 second live view of "the current alert" would either duplicate the popup's
 data or need its own cross-thread wiring for no functional gain over what
 `HistoryPanel`'s top row already shows post-hoc.
+
+## STEP 7 — MVP Reliability & Adversarial Validation
+
+Full failure-mode matrix, performance baseline, and manual
+destructive-input simulation results are in `RELIABILITY.md` — this
+section covers the actual code decisions made in response to what that
+validation found. No malware used or executed anywhere in this step.
+
+### D34. Monitor dedup fixed: content signature, not path alone (P1)
+
+`DownloadMonitorHandler._process_event` used a plain `set` of file paths
+to dedupe the created/modified/moved event burst that fires for one
+physical write. This meant that once ANY file had been analyzed at a given
+path (e.g. `installer.exe`), a genuinely different file later downloaded
+to that exact same path — common, since browsers reuse default filenames —
+was silently never analyzed again for the lifetime of the running process.
+For a security tool, silently going blind to new files at a reused
+filename is a real gap, not a cosmetic one.
+
+**Fix:** dedup key changed to `(size, mtime)` per path, checked via
+`os.stat()` *after* the file is confirmed accessible (so the signature
+reflects settled content, not a mid-write snapshot). The
+created/modified/moved burst for one physical write still collapses to
+one analysis (same signature each time); a genuinely new file at the same
+path — different size and/or mtime — is now analyzed. Also made the
+handler's settle-delay/retry timing constructor-injectable
+(`settle_delay_seconds`, `retry_interval_seconds`, `max_retries`,
+defaults unchanged) purely for test speed — `start_monitoring()`'s
+production behavior is identical to before. Covered by
+`tests/test_monitor_service.py` (new — no dedicated monitor test file
+existed before this step) and the rapid-burst tests in
+`tests/test_stress_rapid_events.py`. Re-verified live in the manual
+demonstration (RELIABILITY.md §4, scenario 4).
+
+### D35. Large-file size limit: pipeline-level guard, analyzer untouched (P1)
+
+Measured (not assumed) `analysis/static_analyzer.py`'s actual throughput:
+reads the whole file into memory, and entropy calculation scales ~O(n) per
+section with a large constant (its own `calculate_entropy()` is always
+computed first via 256 `bytes.count()` calls before `section.get_entropy()`
+is tried and usually overwrites it — so the expensive path runs even when
+its result is immediately discarded). Measured: **~0.42s/MB, memory delta
+≈1:1 with file size** (5MB → 1.77s, 25MB → 10.09s, 75MB → 31.56s). A
+200MB+ legitimate installer — not unusual — would block the single
+watchdog dispatch thread for well over a minute, during which no other
+file gets detected at all.
+
+**Decision:** add a size check at the pipeline boundary
+(`AnalysisPipeline.analyze_and_decide`, right after the missing-file
+check, before `analyze_file()` is ever called), not inside
+`static_analyzer.py` itself. `config.settings.MAX_ANALYSIS_FILE_SIZE_BYTES`
+defaults to 50MB (env-overridable via `MAX_ANALYSIS_FILE_SIZE_BYTES`), and
+is also constructor-injectable on `AnalysisPipeline` for testing without
+building genuinely huge fixtures. A file over the limit gets a controlled
+`analysis_status: "skipped:oversized"` event — `risk.score`/`level` are
+`None` (never fabricated), the reason text explicitly states "This does
+NOT mean the file is safe," and — matching the existing `missing_file`/
+`error:<stage>` policy (D19) — it is **not** persisted and does **not**
+trigger guidance, since only a completed analysis reaches those stages.
+
+**Why the pipeline boundary, not the analyzer:** the task explicitly said
+"do NOT immediately optimize" the analyzer, and `static_analyzer.py` has
+22 existing regression tests (D7) protecting its current behavior — adding
+an early-exit branch inside it would touch a working, tested module for a
+concern (worst-case latency) that belongs to the orchestration layer
+either way. 50MB was chosen as a round number giving a ~20s worst-case
+bound at the measured rate — conservative enough to cover the vast
+majority of real malware/dropper samples (typically far smaller) while
+explicitly declining to claim safety for anything it didn't actually
+analyze, consistent with the project's "unknown ≠ clean" principle
+throughout. Optimizing the analyzer itself (e.g. not double-computing
+entropy, streaming instead of loading the whole file) remains P2/P3,
+explicitly deferred.
+
+Covered by `tests/test_large_file_handling.py` (policy, using injectable
+small thresholds — not a real 50MB fixture in the suite) and
+`tests/test_performance_baseline.py` (proves an oversized file returns in
+milliseconds regardless of its actual size, since the expensive path is
+never entered).
+
+### D36. `tests/test_threat_intel.py` was not a test — replaced (P1)
+
+Found while building the external-service chaos coverage the task asked
+for: `tests/test_threat_intel.py` had zero `test_`-prefixed functions —
+it was a manual CLI diagnostic script (`run_test()` + `if __name__ ==
+"__main__"`), identical in spirit to `analysis/manual_static_check.py` and
+`analysis/manual_feature_check.py`, but never renamed off the `test_`
+prefix the way D9 established for exactly this situation. Pytest silently
+collected the file and found nothing to run; running it directly makes a
+real network call. `threat_intel_client.py` — the module that owns every
+external-service failure mode this step is about — had **no real
+automated coverage at all** prior to this step.
+
+**Fix:** renamed to `tests/manual_threat_intel_check.py` (matching D9),
+content unchanged. Replaced the coverage gap with
+`tests/test_threat_intel_chaos.py` (20 tests: success, timeout, connection
+error, HTTP error, malformed JSON, missing API key, partial/unexpected
+provider responses, combined-confidence logic) and
+`tests/test_ai_explainer_chaos.py` (9 tests, mocking the OpenAI client
+directly rather than depending on `OPENAI_API_KEY` being absent from the
+environment — `tests/test_ai_explainer.py`'s existing
+`test_explainer_runs_on_suspicious_files` branches its own assertions on
+whether a real key happens to be configured, which is itself a P2 gap,
+documented but not touched since it's outside this step's file list and
+still passes correctly in this environment).
+
+### D37. Persistence reliability re-verified against real failures, not just mocks
+
+`tests/test_analysis_pipeline.py`'s existing persistence-failure tests use
+`FakePersistence` (raises / returns `False`) — already proven correct for
+the pipeline's own contract (Step 4 D20). This step additionally verified
+`AdminEventLogger` itself against **real** SQLite failure conditions:
+a non-SQLite file at the db path (construction doesn't crash,
+`log_event()` observably returns `False`), a missing parent directory
+(auto-created), and genuine lock contention from a second real `sqlite3`
+connection holding `BEGIN EXCLUSIVE` — proving the `busy_timeout=3000`
+PRAGMA (Step 6 D31) actually does what it claims: a transient lock
+released within the window still succeeds, a lock held longer fails
+observably within ~3s rather than hanging indefinitely or reporting false
+success. See `tests/test_persistence_failure_modes.py`.
+
+### D38. Security invariants consolidated into one regression file
+
+`tests/test_security_invariants.py` is new, consolidating checks that were
+previously either implicit or scattered: no execution primitive anywhere
+in the pipeline-relevant source tree (repo-wide grep, correctly excluding
+the `SUSPICIOUS_APIS` string-literal detection signatures in
+`static_analyzer.py` from false-positiving on `ShellExecuteA`/
+`CreateProcessA` appearing as *data*, not calls), no deletion primitive,
+analyzing a file leaves its bytes and mtime completely unchanged, unknown
+threat intel never yields a SAFE classification, and `event_id` identity
+holds across the full pipeline → persistence → retrieval → UI chain using
+real components end-to-end (not mocks at every layer).
+
+### D39. Findings deliberately left undone (P2/P3 — see RELIABILITY.md for full detail)
+
+- `decision/risk_evaluator.py` is not defensive against wrong-typed input
+  (raises `TypeError`) — already caught one layer up by the pipeline's own
+  exception boundary; not worth adding redundant type-checking to a pure,
+  well-tested function whose only real producer is well-typed by
+  construction.
+- `threat_intel_client.get_reputation()`'s partial-failure ambiguity (one
+  provider failing looks identical to a genuine negative) — pre-existing,
+  not a Step 7 regression, would need a return-shape change out of scope
+  here.
+- A file that's readable but still being actively written (no exclusive
+  lock held by the writer) can be analyzed mid-write, producing a safe but
+  potentially inaccurate "invalid PE" result for a large slow download —
+  inherently heuristic to fix properly, deferred.
+- Interrupted-write (process killed mid-`INSERT`) database integrity
+  relies on SQLite's own atomic-commit guarantee, not independently
+  re-verified — disproportionate to test for this step.
+- `ai/ai_explainer.py`'s own extraction of `entropy`/`suspicious_imports`/
+  `packed_flag` in `_construct_prompt()` reads the aggregator's reduced
+  `static_analysis` shape (D30's "reduced sub-dict" — correct for this
+  consumer, unlike the final event) — noted only for completeness, not a
+  defect.
+
+Full regression suite after Step 7: **188 passed, 0 failed, 0 skipped**
+(112 going into this step + 76 new across 8 new test files). No real
+database, no real Downloads directory, no network access required by any
+test. Manual demonstration against the real app: see RELIABILITY.md §4.

@@ -40,6 +40,7 @@ from typing import Any, Dict, Optional
 from analysis.static_analyzer import analyze_file
 from decision.risk_evaluator import evaluate_risk_as_dict
 from intelligence.intelligence_aggregator import aggregate_intelligence
+from config.settings import MAX_ANALYSIS_FILE_SIZE_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +74,13 @@ class AnalysisPipeline:
         ai_explainer=None,
         persistence=None,
         guidance=None,
+        max_file_size_bytes=MAX_ANALYSIS_FILE_SIZE_BYTES,
     ):
         self._threat_intel_client = threat_intel_client
         self._ai_explainer = ai_explainer
         self._persistence = persistence
         self._guidance = guidance
+        self._max_file_size_bytes = max_file_size_bytes
 
     def analyze_and_decide(self, file_path: str) -> Dict[str, Any]:
         """
@@ -93,6 +96,23 @@ class AnalysisPipeline:
             logger.warning(f"[Pipeline] File not found or inaccessible: {file_path}")
             return self._controlled_event(event_id, file_path, "missing_file",
                                            ["File not found or inaccessible at analysis time"])
+
+        try:
+            file_size = os.path.getsize(file_path)
+        except OSError:
+            file_size = None
+        if file_size is not None and file_size > self._max_file_size_bytes:
+            limit_mb = self._max_file_size_bytes / (1024 * 1024)
+            actual_mb = file_size / (1024 * 1024)
+            logger.warning(
+                f"[Pipeline] File exceeds analysis size limit "
+                f"({actual_mb:.1f}MB > {limit_mb:.0f}MB), skipping full analysis: {file_path}"
+            )
+            return self._controlled_event(
+                event_id, file_path, "skipped:oversized",
+                [f"File size {actual_mb:.1f}MB exceeds the {limit_mb:.0f}MB analysis limit — "
+                 "not analyzed. This does NOT mean the file is safe."],
+            )
 
         try:
             analysis = analyze_file(file_path)
